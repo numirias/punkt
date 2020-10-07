@@ -23,7 +23,7 @@ setup(
     classifiers=[
         'Development Status :: 2 - Pre-Alpha',
         'Natural Language :: English',
-        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
     ],
     description='Dotfiles management',
     entry_points={
@@ -49,5 +49,5 @@ setup(
     # TODO Needed?
     tests_require=test_requirements,
     url='https://github.com/numirias/punkt',
-    version='0.1',
+    version='0.2',
 )
