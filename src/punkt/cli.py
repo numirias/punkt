@@ -1,6 +1,5 @@
 from datetime import datetime
 from pathlib import Path
-import shutil
 import sys
 import os
 
@@ -39,11 +38,11 @@ def load_config():
     print(f'Backup path: {BACKUP_PATH}')
     config = read_config()
     config['directories'] = [
-        (target, Path(link).expanduser()) for \
+        (target, Path(link).expanduser()) for
         target, link in config.setdefault('directories', [])
     ]
     config['symlinks'] = [
-        (Path(target).expanduser(), Path(link).expanduser()) for \
+        (Path(target).expanduser(), Path(link).expanduser()) for
         target, link in config.setdefault('symlinks', [])
     ]
     print('config loaded.')
@@ -65,13 +64,10 @@ def symlink_status(target, link):
         # Use os.readlink() to resolve the symlink exactly one level
         if Path(os.readlink(link)) == target:
             return 'managed'
-        else:
-            return 'unmanaged'
-    else:
-        if link.exists():
-            return 'unmanaged'
-        else:
-            return 'missing'
+        return 'unmanaged'
+    if link.exists():
+        return 'unmanaged'
+    return 'missing'
 
 
 def install_symlink(target, link, dry_run):
