@@ -13,6 +13,7 @@ DEFAULT_PATH = Path('~/.dotfiles')
 DEFAULT_CONFIG_PATH = DEFAULT_PATH / 'punkt.conf.py'
 DEFAULT_DATA_PATH = DEFAULT_PATH / Path('data')
 DEFAULT_BACKUP_PATH = Path('~/.cache/punkt')
+BACKUP_DIR_FORMAT = 'backup%Y-%d-%m_%H-%M-%S'
 
 
 good = lambda s: click.style(s, fg='green')
@@ -24,82 +25,96 @@ def fatal(msg):
     sys.exit(1)
 
 
+@dataclass
+class Link:
+    _loc: str
+    _target: str
+
+    def __repr__(self):
+        return f'[{self._loc} -> {self._target}]'
+
+    @property
+    def status(self, pretty=False):
+        status = self._status()
+        if not pretty:
+            return status
+        raise NotImplementedError()
+
+    def _status(self):
+        if self._loc.resolve() == self._target:
+            return 'managed'
+        if self._loc.is_symlink():
+            # symlink.exists() returns False if the symlinkt *target* does not
+            # exist. Use os.readlink() to resolve the symlink exactly one level
+            if Path(os.readlink(self._loc)) == self._target:
+                return 'managed'
+            return 'unmanaged'
+        if self._loc.exists():
+            return 'unmanaged'
+        return 'missing'
+
+    @property
+    def status_code(self):
+        if self._status() == 'managed':
+            return 0
+        return 1
+
+    def install(self):
+        self._loc.symlink_to(self._target)
+
+    def backup(self, backups_dir):
+        """Move `path` into the current backup directory."""
+        return # TODO
+        parent = backups_dir / datetime.now().strftime(BACKUP_DIR_FORMAT)
+        parent.mkdir(parents=True, exist_ok=True)
+        Path(self._loc).rename(parent / self._loc.name)
+
+
+class Config:
+
+    def __init__(self):
+        self._links = []
+
+    def add_link(self, link, target):
+        self._links.append(Link(link, target))
+
+    def add_links(self, link, target):
+        link = Path(link).expanduser()
+        target = self.spec.data_path / Path(target)
+        # assert not link.is_absolute()
+        # assert target.is_absolute()
+        for path in target.iterdir():
+            self.add_link(link / path.name, path)
+
+    def all_links(self):
+        yield from self._links
+
+
 def load_config(path):
     """Load config from given `path` and return config as module object.
     """
     spec = util.spec_from_file_location('config', str(path))
     if spec is None:
         raise OSError('failed to load config')
-    config = util.module_from_spec(spec)
-    spec.loader.exec_module(config)
+    conf_spec = util.module_from_spec(spec)
+    spec.loader.exec_module(conf_spec)
 
-    config.data_path = Path(getattr(config, 'data_path', DEFAULT_DATA_PATH)).expanduser()
-    config.directories = [
-        ( config.data_path / Path(target), Path(link).expanduser()) for
-        target, link in getattr(config, 'directories', [])
-    ]
-    config.symlinks = [
-        (Path(target).expanduser(), Path(link).expanduser()) for
-        target, link in getattr(config, 'symlinks', [])
-    ]
+    conf_spec.data_path = Path(getattr(conf_spec, 'data_path', DEFAULT_DATA_PATH)).expanduser()
+    conf_spec.directories = getattr(conf_spec, 'directories', [])
+    conf_spec.symlinks = getattr(conf_spec, 'symlinks', [])
+
+    config = Config()
+    config.spec = conf_spec
+    for target, link in conf_spec.directories:
+        config.add_links(link, target)
+    # TODO handle explicit symlinks
     echo(f'config loaded from: {path}')
     return config
 
 
-def backup(path, target_parent):
-    """Move `path` into the current backup directory."""
-    target_path = target_parent / datetime.now().strftime('backup%Y-%d-%m_%H-%M-%S')
-    target_path.mkdir(parents=True, exist_ok=True)
-    Path(path).rename(target_path / path.name)
-
-
-def symlink_status(target, link):
-    if link.resolve() == target:
-        return 'managed'
-    if link.is_symlink():
-        # Note that symlink.exists() returns False if the symlinkt *target*
-        # does not exist.
-        # Use os.readlink() to resolve the symlink exactly one level
-        if Path(os.readlink(link)) == target:
-            return 'managed'
-        return 'unmanaged'
-    if link.exists():
-        return 'unmanaged'
-    return 'missing'
-
-
-def install_symlink(target, link, dry_run):
-    echo(f'symlink "{link}" -> "{target}"... ', nl=False)
-    status = symlink_status(target, link)
-    if status == 'managed':
-        echo(ok('skip (managed)'))
-        return
-    if status == 'unmanaged':
-        echo('backup... ', nl=False)
-        if dry_run:
-            echo(ok('dry run '), nl=False)
-        else:
-            backup(link)
-            echo(good('OK '), nl=False)
-    echo('create symlink... ', nl=False)
-    if dry_run:
-        echo(ok('dry run'))
-    else:
-        link.symlink_to(target)
-        echo(good('OK'))
-
-
-def symlink_pairs(config):
-    for target_parent, link_parent in config.directories:
-        echo(f'\nhandle symlinks: {target_parent}/* <- {link_parent}/*')
-        for path in (config.data_path / target_parent).iterdir():
-            yield (path, link_parent / path.name)
-    for target, link in config.symlinks:
-        yield (target, link)
-
-
 @click.group()
-@click.option('-c', '--config-path', type=click.Path(exists=True), default=lambda: str(DEFAULT_CONFIG_PATH.expanduser()))
+@click.option('-c', '--config-path', type=click.Path(exists=True),
+        default=lambda: str(DEFAULT_CONFIG_PATH.expanduser()))
 @click.pass_context
 def cli(ctx, config_path):
     try:
@@ -144,38 +159,56 @@ def add(config, path):
 @click.pass_obj
 def check(config):
     flaws = 0
-    for target, link in symlink_pairs(config):
-        status = symlink_status(target, link)
+    for link in config.all_links():
+        status = link.status
         echo(f'\tcheck: {link} -- ', nl=False)
-        if status == 'managed':
-            echo(good('managed'))
-            continue
-        flaws += 1
-        if status in ['missing', 'unmanaged']:
+        if link.status_code == 0:
+            echo(good(status))
+        else:
             echo(bad(status))
+            flaws += 1
     sys.exit(flaws and 1)
 
 
 @cli.command(help='install dotfiles')
 @click.option('--dry-run', default=False, is_flag=True)
-@click.option('-b', '--backup-path', type=click.Path(), default=lambda: str(DEFAULT_BACKUP_PATH.expanduser()))
+@click.option('-b', '--backup-path', type=click.Path(),
+        default=lambda: str(DEFAULT_BACKUP_PATH.expanduser()))
 @click.option('-B', '--no-backup', default=False, is_flag=True)
 @click.pass_obj
 def install(config, dry_run, backup_path, no_backup):
     echo(f'backup path: {backup_path}')
-    for target, link in symlink_pairs(config):
-        install_symlink(target, link, dry_run)
+    for link in config.all_links():
+        echo(f'{link}... ', nl=False)
+        status = link.status
+        if status == 'managed':
+            echo(ok('skip (managed)'))
+            continue
+        if status == 'unmanaged':
+            echo('backup... ', nl=False)
+            if dry_run:
+                echo(ok('dry run '), nl=False)
+            else:
+                link.backup()
+                echo(good('OK '), nl=False)
+        echo('create symlink... ', nl=False)
+        if dry_run:
+            echo(ok('dry run'))
+            continue
+        link.install()
+        echo(good('OK'))
 
 
 @cli.command(help='uninstall dotfiles')
 @click.option('--dry-run', default=False, is_flag=True)
-@click.option('-b', '--backup-path', type=click.Path(), default=lambda: str(DEFAULT_BACKUP_PATH.expanduser()))
+@click.option('-b', '--backup-path', type=click.Path(),
+        default=lambda: str(DEFAULT_BACKUP_PATH.expanduser()))
 @click.option('-B', '--no-backup', default=False, is_flag=True)
 @click.pass_obj
 def uninstall(config, dry_run, backup_path, no_backup):
     echo(f'backup path: {backup_path}')
-    for target, link in symlink_pairs(config):
-        status = symlink_status(target, link)
+    for link in config.all_links():
+        status = link.status
         echo(f'backing up: {link} -- ', nl=False)
         if status == 'missing':
             echo(ok('skip (does not exist)'))
@@ -187,7 +220,7 @@ def uninstall(config, dry_run, backup_path, no_backup):
             echo(ok('dry run'))
             continue
         if not no_backup:
-            backup(link, backup_path)
+            link.backup()
         echo(good('ok'))
 
 

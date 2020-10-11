@@ -109,6 +109,7 @@ class TestFeatures:
         assert not p.lfoo.exists()
 
         res = runner.invoke(cli, ['install'])
+        print(res.output)
         assert res.exit_code == 0
         assert p.lfoo.exists()
         assert 'skip' not in res.output
