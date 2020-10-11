@@ -28,7 +28,7 @@ setup(
     description='Dotfiles management',
     entry_points={
         'console_scripts': [
-            'punkt=punkt.cli:main',
+            'punkt=punkt.cli:cli',
         ],
     },
     install_requires=[

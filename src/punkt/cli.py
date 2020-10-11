@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import util
 import os
@@ -6,55 +7,50 @@ import shutil
 import sys
 
 import click
-import colorama
-from colorama import Fore, Style
+from click import echo
+
+DEFAULT_PATH = Path('~/.dotfiles')
+DEFAULT_CONFIG_PATH = DEFAULT_PATH / 'punkt.conf.py'
+DEFAULT_DATA_PATH = DEFAULT_PATH / Path('data')
+DEFAULT_BACKUP_PATH = Path('~/.cache/punkt')
 
 
-HERE = Path(__file__).parent.absolute()
-DOTFILES_PATH = Path('~/.dotfiles').expanduser()
-DOTFILES_DATA_PATH = DOTFILES_PATH / Path('data')
-BACKUP_PATH = Path().home() / '.cache/punkt' / \
-    datetime.now().strftime('backup%Y-%d-%m_%H-%M-%S')
-
-print = click.echo
-
-def colorize(s, color):
-    return color + str(s) + Style.RESET_ALL
-
-good = lambda s: colorize(s, Fore.GREEN)
-bad = lambda s: colorize(s, Fore.RED)
-ok = lambda s: colorize(s, Fore.YELLOW)
+good = lambda s: click.style(s, fg='green')
+bad = lambda s: click.style(s, fg='red')
+ok = lambda s: click.style(s, fg='yellow')
 
 def fatal(msg):
-    print(bad(f'error: {msg}'))
-    exit(1)
+    echo(bad(f'error: {msg}'))
+    sys.exit(1)
 
-def load_config(config_path):
-    if not Path(config_path).exists():
-        raise FileNotFoundError('config path not found')
 
-    spec = util.spec_from_file_location('config', config_path)
+def load_config(path):
+    """Load config from given `path` and return config as module object.
+    """
+    spec = util.spec_from_file_location('config', str(path))
     if spec is None:
         raise OSError('failed to load config')
     config = util.module_from_spec(spec)
     spec.loader.exec_module(config)
 
+    config.data_path = Path(getattr(config, 'data_path', DEFAULT_DATA_PATH)).expanduser()
     config.directories = [
-        (DOTFILES_DATA_PATH / Path(target), Path(link).expanduser()) for
+        ( config.data_path / Path(target), Path(link).expanduser()) for
         target, link in getattr(config, 'directories', [])
     ]
     config.symlinks = [
         (Path(target).expanduser(), Path(link).expanduser()) for
         target, link in getattr(config, 'symlinks', [])
     ]
-    print(f'config loaded from: {config_path}')
+    echo(f'config loaded from: {path}')
     return config
 
 
-def backup(target):
-    """Move `target` into the current backup directory."""
-    BACKUP_PATH.mkdir(parents=True, exist_ok=True)
-    Path(target).rename(BACKUP_PATH / target.name)
+def backup(path, target_parent):
+    """Move `path` into the current backup directory."""
+    target_path = target_parent / datetime.now().strftime('backup%Y-%d-%m_%H-%M-%S')
+    target_path.mkdir(parents=True, exist_ok=True)
+    Path(path).rename(target_path / path.name)
 
 
 def symlink_status(target, link):
@@ -73,51 +69,51 @@ def symlink_status(target, link):
 
 
 def install_symlink(target, link, dry_run):
-    print(f'symlink "{link}" -> "{target}"... ', nl=False)
+    echo(f'symlink "{link}" -> "{target}"... ', nl=False)
     status = symlink_status(target, link)
     if status == 'managed':
-        print(ok('skip (managed)'))
+        echo(ok('skip (managed)'))
         return
     if status == 'unmanaged':
-        print('backup... ', nl=False)
+        echo('backup... ', nl=False)
         if dry_run:
-            print(ok('dry run '), nl=False)
+            echo(ok('dry run '), nl=False)
         else:
             backup(link)
-            print(good('OK '), nl=False)
-    print('create symlink... ', nl=False)
+            echo(good('OK '), nl=False)
+    echo('create symlink... ', nl=False)
     if dry_run:
-        print(ok('dry run'))
+        echo(ok('dry run'))
     else:
         link.symlink_to(target)
-        print(good('OK'))
+        echo(good('OK'))
 
 
 def symlink_pairs(config):
     for target_parent, link_parent in config.directories:
-        print(f'\nhandle symlinks: {target_parent}/* <- {link_parent}/*')
-        for path in (DOTFILES_DATA_PATH / target_parent).iterdir():
+        echo(f'\nhandle symlinks: {target_parent}/* <- {link_parent}/*')
+        for path in (config.data_path / target_parent).iterdir():
             yield (path, link_parent / path.name)
     for target, link in config.symlinks:
         yield (target, link)
 
 
 @click.group()
-@click.option('-c', '--config', default=DOTFILES_PATH / 'punkt.conf.py')
+@click.option('-c', '--config-path', type=click.Path(exists=True), default=lambda: str(DEFAULT_CONFIG_PATH.expanduser()))
 @click.pass_context
-def cli(ctx, config):
+def cli(ctx, config_path):
     try:
-        ctx.obj = load_config(config)
+        ctx.obj = load_config(config_path)
     except OSError as e:
         ctx.fail(e)
-    print(f'action: {ctx.invoked_subcommand}')
+    echo(f'action: {ctx.invoked_subcommand}')
 
 
 @cli.command(help='add path')
 @click.argument('path')
 @click.pass_obj
 def add(config, path):
-    path = Path(path).expanduser().absolute()
+    path = Path(path).absolute()
     if not (path.exists() or path.is_symlink()):
         fatal(f'not found: {path}')
     for target_parent, link_parent in config.directories:
@@ -129,74 +125,71 @@ def add(config, path):
     target = target_parent / path.name
     if target.exists():
         fatal(f'target already exists: {target}')
-    if path.is_symlink() and DOTFILES_DATA_PATH in Path(os.readlink(path)).parents:
+    if path.is_symlink() and config.data_path in Path(os.readlink(path)).parents:
         fatal(f'already links into dotfiles: {path} -> {Path(os.readlink(path))}')
     try:
-        dest = shutil.move(str(path), str(target_parent))
+        # TODO use rename
+        path.rename(path, target)
     except OSError as e:
         fatal(f'moving failed: {e}')
-    print(f'moved: {path} => {dest}')
+    echo(f'moved: {path} => {target}')
     try:
         path.symlink_to(target)
     except OSError as e:
         fatal(f'link failed: {e}')
-    print(f'link created: {path} => {target}')
-
+    echo(f'link created: {path} => {target}')
 
 
 @cli.command(help='check status')
 @click.pass_obj
 def check(config):
+    flaws = 0
     for target, link in symlink_pairs(config):
         status = symlink_status(target, link)
-        print(f'\tcheck: {link} -- ', nl=False)
-        if status == 'missing':
-            print(bad('missing'))
-            continue
-        if status == 'unmanaged':
-            print(bad('unmanaged'))
-            continue
+        echo(f'\tcheck: {link} -- ', nl=False)
         if status == 'managed':
-            print(good('managed'))
+            echo(good('managed'))
             continue
+        flaws += 1
+        if status in ['missing', 'unmanaged']:
+            echo(bad(status))
+    sys.exit(flaws and 1)
 
 
 @cli.command(help='install dotfiles')
-@click.pass_obj
 @click.option('--dry-run', default=False, is_flag=True)
-def install(config, dry_run):
-    print(f'backup path: {BACKUP_PATH}')
+@click.option('-b', '--backup-path', type=click.Path(), default=lambda: str(DEFAULT_BACKUP_PATH.expanduser()))
+@click.option('-B', '--no-backup', default=False, is_flag=True)
+@click.pass_obj
+def install(config, dry_run, backup_path, no_backup):
+    echo(f'backup path: {backup_path}')
     for target, link in symlink_pairs(config):
         install_symlink(target, link, dry_run)
 
 
 @cli.command(help='uninstall dotfiles')
 @click.option('--dry-run', default=False, is_flag=True)
+@click.option('-b', '--backup-path', type=click.Path(), default=lambda: str(DEFAULT_BACKUP_PATH.expanduser()))
+@click.option('-B', '--no-backup', default=False, is_flag=True)
 @click.pass_obj
-def uninstall(config, dry_run):
-    config = load_config()
-    print(f'backup path: {BACKUP_PATH}')
+def uninstall(config, dry_run, backup_path, no_backup):
+    echo(f'backup path: {backup_path}')
     for target, link in symlink_pairs(config):
         status = symlink_status(target, link)
-        print(f'backing up: {link} -- ', nl=False)
+        echo(f'backing up: {link} -- ', nl=False)
         if status == 'missing':
-            print(ok('skip (does not exist)'))
+            echo(ok('skip (does not exist)'))
             continue
         if status == 'unmanaged':
-            print(ok('skip (unmanaged)'))
+            echo(ok('skip (unmanaged)'))
             continue
         if dry_run:
-            print(ok('dry run'))
+            echo(ok('dry run'))
             continue
-        backup(link)
-        print(good('ok'))
-
-
-def main():
-    colorama.init()
-    cli() # pylint:disable=no-value-for-parameter
-    return 1
+        if not no_backup:
+            backup(link, backup_path)
+        echo(good('ok'))
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    cli() # pylint:disable=no-value-for-parameter
